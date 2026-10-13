@@ -4,49 +4,71 @@ const SYSTEM =
   "You are a friendly voice assistant. Reply in short, natural spoken sentences. " +
   "No markdown, lists, or emojis. Answer in the same language the user speaks.";
 
+const PREFER = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
+
+// Asks Groq which models exist right now, so a retired model name can never break the app.
+async function pickModel(key) {
+  const r = await fetch("https://api.groq.com/openai/v1/models", {
+    headers: { Authorization: "Bearer " + key },
+  });
+  if (!r.ok) throw new Error("Could not list models (" + r.status + "): " + (await r.text()));
+  const ids = (await r.json()).data.map((m) => m.id);
+  for (const p of PREFER) if (ids.includes(p)) return p;
+  const chat = ids.filter((id) => !/whisper|guard|tts|playai|orpheus|embed/i.test(id));
+  if (!chat.length) throw new Error("No chat model available on this Groq account.");
+  return chat[0];
+}
+
 export default async function handler(req) {
   if (req.method !== "POST") return new Response("POST only", { status: 405 });
 
-  const { messages = [] } = await req.json();
+  const key = process.env.GROQ_API_KEY;
+  if (!key) return new Response("GROQ_API_KEY is not set in Vercel.", { status: 500 });
 
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + process.env.GROQ_API_KEY,
-    },
-    body: JSON.stringify({
-      model: "llama-3.1-8b-instant", // if Groq retires it, pick a current model from console.groq.com
-      stream: true,
-      max_tokens: 300,
-      messages: [{ role: "system", content: SYSTEM }, ...messages.slice(-12)],
-    }),
-  });
+  try {
+    const { messages = [] } = await req.json();
+    const model = await pickModel(key);
 
-  if (!r.ok) return new Response(await r.text(), { status: r.status });
+    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        max_tokens: 300,
+        messages: [{ role: "system", content: SYSTEM }, ...messages.slice(-12)],
+      }),
+    });
 
-  const dec = new TextDecoder();
-  const enc = new TextEncoder();
-  let buf = "";
+    if (!r.ok) {
+      return new Response("Groq error " + r.status + " (model " + model + "): " + (await r.text()), { status: 502 });
+    }
 
-  const stream = r.body.pipeThrough(
-    new TransformStream({
-      transform(chunk, ctrl) {
-        buf += dec.decode(chunk, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop();
-        for (const l of lines) {
-          if (!l.startsWith("data: ") || l.includes("[DONE]")) continue;
-          try {
-            const t = JSON.parse(l.slice(6)).choices[0].delta.content;
-            if (t) ctrl.enqueue(enc.encode(t));
-          } catch {}
-        }
-      },
-    })
-  );
+    const dec = new TextDecoder();
+    const enc = new TextEncoder();
+    let buf = "";
 
-  return new Response(stream, {
-    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
-  });
+    const stream = r.body.pipeThrough(
+      new TransformStream({
+        transform(chunk, ctrl) {
+          buf += dec.decode(chunk, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop();
+          for (const l of lines) {
+            if (!l.startsWith("data: ") || l.includes("[DONE]")) continue;
+            try {
+              const t = JSON.parse(l.slice(6)).choices[0].delta.content;
+              if (t) ctrl.enqueue(enc.encode(t));
+            } catch {}
+          }
+        },
+      })
+    );
+
+    return new Response(stream, {
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  } catch (e) {
+    return new Response("Server problem: " + e.message, { status: 502 });
+  }
 }
