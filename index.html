@@ -145,7 +145,7 @@ async function ask(text){
   const out = bubble("a", ""); let full = "", buf = "";
   try{
     const res = await fetch("/api/chat", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({messages:history}), signal:ctrl.signal});
-    if (!res.ok) throw new Error("Server returned " + res.status);
+    if (!res.ok) throw new Error((await res.text()).slice(0, 300));
     const rd = res.body.getReader(), dec = new TextDecoder();
     while (true){
       const {done, value} = await rd.read(); if (done) break;
@@ -159,7 +159,7 @@ async function ask(text){
     if (full) history.push({role:"assistant", content:full});
   }catch(err){
     if (err.name !== "AbortError"){
-      out.textContent = "Could not reach the assistant. " + err.message + ". Check that /api/chat is deployed and GROQ_API_KEY is set.";
+      out.textContent = "Assistant error: " + err.message;
       setS("idle");
     }
   }
