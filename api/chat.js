@@ -1,22 +1,24 @@
 export const config = { runtime: "edge" };
 
 const SYSTEM =
-  "You are a friendly voice assistant. Reply in short, natural spoken sentences. " +
+  "You are a friendly voice assistant. Keep every reply to one or two short spoken sentences unless asked for more. " +
   "No markdown, lists, or emojis. Answer in the same language the user speaks.";
 
 const PREFER = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
 
 // Asks Groq which models exist right now, so a retired model name can never break the app.
+let cachedModel = "";
 async function pickModel(key) {
+  if (cachedModel) return cachedModel;
   const r = await fetch("https://api.groq.com/openai/v1/models", {
     headers: { Authorization: "Bearer " + key },
   });
   if (!r.ok) throw new Error("Could not list models (" + r.status + "): " + (await r.text()));
   const ids = (await r.json()).data.map((m) => m.id);
-  for (const p of PREFER) if (ids.includes(p)) return p;
+  for (const p of PREFER) if (ids.includes(p)) return (cachedModel = p);
   const chat = ids.filter((id) => !/whisper|guard|tts|playai|orpheus|embed/i.test(id));
   if (!chat.length) throw new Error("No chat model available on this Groq account.");
-  return chat[0];
+  return (cachedModel = chat[0]);
 }
 
 export default async function handler(req) {
@@ -35,7 +37,7 @@ export default async function handler(req) {
       body: JSON.stringify({
         model,
         stream: true,
-        max_tokens: 300,
+        max_tokens: 200,
         messages: [{ role: "system", content: SYSTEM }, ...messages.slice(-12)],
       }),
     });
