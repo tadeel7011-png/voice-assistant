@@ -73,7 +73,8 @@ label.t{display:flex;gap:6px;align-items:center;color:var(--mute);font-size:.85r
 const $ = id => document.getElementById(id);
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const synth = window.speechSynthesis;
-let rec, active = false, speaking = false, streaming = false, utter = 0, ctrl = null, history = [], live = null;
+let rec, active = false, speaking = false, streaming = false, utter = 0, ctrl = null, history = [], live = null, base = 0, lastLen = 0, timer = null;
+const SILENCE = 650; // ms of quiet before your sentence is sent. Lower = faster, but may cut you off mid-pause.
 
 const LABELS = {idle:"Ready", listening:"Listening", thinking:"Thinking", speaking:"Speaking"};
 function setS(s){ document.body.dataset.s = s; $("status").textContent = LABELS[s]; }
@@ -97,21 +98,18 @@ function listen(){
 function makeRec(){
   rec = new SR();
   rec.lang = $("lang").value; rec.continuous = true; rec.interimResults = true;
+  rec.onstart = () => { base = 0; lastLen = 0; };
   rec.onresult = e => {
-    let interim = "", final = "";
-    for (let i = e.resultIndex; i < e.results.length; i++){
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) final += t; else interim += t;
-    }
-    if ((interim || final) && speaking) interrupt();
-    if (interim){
-      if (!live) live = bubble("u live", "");
-      live.textContent = interim;
-    }
-    if (final.trim()){
-      if (live){ live.remove(); live = null; }
-      ask(final.trim());
-    }
+    lastLen = e.results.length;
+    let text = "";
+    for (let i = base; i < e.results.length; i++) text += e.results[i][0].transcript;
+    text = text.trim();
+    if (!text) return;
+    if (speaking) interrupt();
+    if (!live) live = bubble("u live", "");
+    live.textContent = text;
+    clearTimeout(timer);
+    timer = setTimeout(submit, e.results[e.results.length - 1].isFinal ? 0 : SILENCE);
   };
   rec.onerror = e => {
     if (e.error === "not-allowed" || e.error === "service-not-allowed"){
@@ -122,6 +120,28 @@ function makeRec(){
   rec.onend = () => { if (active && !speaking && !streaming) setTimeout(listen, 150); };
 }
 
+function submit(){
+  const t = live ? live.textContent.trim() : "";
+  if (!t) return;
+  live.remove(); live = null; base = lastLen;
+  ask(t);
+}
+
+function pickVoice(){
+  const l = $("lang").value.toLowerCase(), v = synth.getVoices();
+  return v.find(x => x.lang.toLowerCase() === l && x.localService)
+      || v.find(x => x.lang.toLowerCase().startsWith(l.slice(0, 2)) && x.localService) || null;
+}
+
+function takeChunk(buf, first){
+  let m = buf.match(/^[\s\S]*?[.!?؟۔\n]+(\s|$)/);
+  if (m) return m[0];
+  m = buf.match(/^[\s\S]{18,}?[,;:،](\s|$)/);
+  if (m) return m[0];
+  if (first && buf.length >= 35 && buf.lastIndexOf(" ") > 20) return buf.slice(0, buf.lastIndexOf(" ") + 1);
+  return null;
+}
+
 function interrupt(){
   synth.cancel(); if (ctrl) ctrl.abort();
   speaking = false; streaming = false; utter = 0;
@@ -130,7 +150,7 @@ function interrupt(){
 function speak(text){
   const t = text.trim(); if (!t) return;
   const u = new SpeechSynthesisUtterance(t);
-  u.lang = $("lang").value;
+  u.lang = $("lang").value; const v = pickVoice(); if (v) u.voice = v;
   u.onstart = () => { speaking = true; setS("speaking"); hint(""); if (!$("barge").checked) try{ rec.stop(); }catch(e){} };
   u.onend = u.onerror = () => { utter--; if (utter <= 0 && !streaming){ utter = 0; speaking = false; if (active){ setS("listening"); listen(); } } };
   utter++; synth.speak(u);
@@ -142,7 +162,7 @@ async function ask(text){
   setS("thinking"); hint("");
   if (!$("barge").checked) try{ rec.stop(); }catch(e){}
   ctrl = new AbortController(); streaming = true;
-  const out = bubble("a", ""); let full = "", buf = "";
+  const out = bubble("a", ""); let full = "", buf = "", first = true;
   try{
     const res = await fetch("/api/chat", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({messages:history}), signal:ctrl.signal});
     if (!res.ok) throw new Error((await res.text()).slice(0, 300));
@@ -152,8 +172,8 @@ async function ask(text){
       const chunk = dec.decode(value, {stream:true});
       full += chunk; buf += chunk; out.textContent = full;
       $("log").scrollTop = $("log").scrollHeight;
-      let m;
-      while ((m = buf.match(/^[\s\S]*?[.!?؟۔\n]+(\s|$)/))){ speak(m[0]); buf = buf.slice(m[0].length); }
+      let c;
+      while ((c = takeChunk(buf, first))){ speak(c); buf = buf.slice(c.length); first = false; }
     }
     if (buf.trim()) speak(buf);
     if (full) history.push({role:"assistant", content:full});
@@ -173,7 +193,7 @@ $("go").onclick = () => {
     active = false; interrupt(); try{ rec.stop(); }catch(e){}
     $("go").textContent = "Start"; setS("idle"); hint("Press Start and begin speaking.");
   } else {
-    active = true; makeRec(); $("go").textContent = "Stop"; listen();
+    active = true; makeRec(); $("go").textContent = "Stop"; synth.speak(new SpeechSynthesisUtterance(" ")); listen();
   }
 };
 $("clear").onclick = () => { history = []; $("log").innerHTML = '<p class="empty">Your conversation will appear here.</p>'; };
